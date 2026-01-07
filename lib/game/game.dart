@@ -1,475 +1,457 @@
+import 'dart:async';
+import 'dart:math';
+import 'package:flame/cache.dart';
 import 'package:flame/components.dart';
 import 'package:flame/events.dart';
 import 'package:flame/game.dart';
 import 'package:flutter/material.dart';
-import 'dart:async';
-import 'dart:math';
+import 'package:flutter/services.dart';
 
-/// Main game class for the tile-swapping puzzle game
-class Batch20260107102709Puzzle01Game extends FlameGame with HasTapDetector, HasCollisionDetection {
+/// Main game states for the puzzle game
+enum GameState {
+  playing,
+  paused,
+  gameOver,
+  levelComplete,
+  loading
+}
+
+/// Main FlameGame class for the tile swap puzzle game
+class Batch20260107102709Puzzle01Game extends FlameGame
+    with HasTappableComponents, HasCollisionDetection {
+  
   /// Current game state
-  GameState _gameState = GameState.menu;
+  GameState _gameState = GameState.loading;
   GameState get gameState => _gameState;
-
-  /// Current level being played
+  
+  /// Current level configuration
   int _currentLevel = 1;
   int get currentLevel => _currentLevel;
-
-  /// Player's current score
-  int _score = 0;
-  int get score => _score;
-
-  /// Stars earned in current level
-  int _starsEarned = 0;
-  int get starsEarned => _starsEarned;
-
-  /// Total stars collected
-  int _totalStars = 0;
-  int get totalStars => _totalStars;
-
-  /// Level timer
-  late Timer _levelTimer;
-  double _timeRemaining = 60.0;
-  double get timeRemaining => _timeRemaining;
-
-  /// Grid system for tiles
-  late GridComponent _gameGrid;
-  late PatternComponent _targetPattern;
-
+  
+  /// Game grid dimensions
+  late int _gridSize;
+  late int _tileTypes;
+  late int _timeLimit;
+  
   /// Game components
-  final List<TileComponent> _tiles = [];
+  late World gameWorld;
+  late CameraComponent gameCamera;
+  
+  /// Grid and tiles
+  late List<List<int>> _currentGrid;
+  late List<List<int>> _targetGrid;
+  late List<List<TileComponent>> _tileComponents;
+  
+  /// Game metrics
+  int _score = 0;
+  int _stars = 0;
+  int _moves = 0;
+  late Timer _gameTimer;
+  int _remainingTime = 0;
+  
+  /// Selected tile for swapping
   TileComponent? _selectedTile;
-
-  /// Level configuration
-  late LevelConfig _currentLevelConfig;
-
-  /// Random number generator
-  final Random _random = Random();
-
-  /// Analytics and services hooks
-  Function(String event, Map<String, dynamic> parameters)? onAnalyticsEvent;
-  Function()? onShowRewardedAd;
-  Function(String key, dynamic value)? onSaveData;
-  Function(String key)? onLoadData;
-
+  
+  /// Game controller reference
+  GameController? _gameController;
+  
+  /// Analytics service reference
+  AnalyticsService? _analyticsService;
+  
+  /// Level configurations
+  static const Map<int, Map<String, dynamic>> _levelConfigs = {
+    1: {
+      'gridSize': 3,
+      'tileTypes': 3,
+      'timeLimit': 60,
+      'pattern': 'checkerboard'
+    },
+    2: {
+      'gridSize': 3,
+      'tileTypes': 4,
+      'timeLimit': 55,
+      'pattern': 'stripes'
+    },
+    3: {
+      'gridSize': 4,
+      'tileTypes': 4,
+      'timeLimit': 50,
+      'pattern': 'corners'
+    },
+    4: {
+      'gridSize': 4,
+      'tileTypes': 5,
+      'timeLimit': 45,
+      'pattern': 'diagonal'
+    },
+    5: {
+      'gridSize': 4,
+      'tileTypes': 5,
+      'timeLimit': 45,
+      'pattern': 'diagonal_stripes'
+    },
+    6: {
+      'gridSize': 5,
+      'tileTypes': 6,
+      'timeLimit': 40,
+      'pattern': 'cross'
+    },
+    7: {
+      'gridSize': 5,
+      'tileTypes': 6,
+      'timeLimit': 38,
+      'pattern': 'spiral'
+    },
+    8: {
+      'gridSize': 5,
+      'tileTypes': 7,
+      'timeLimit': 35,
+      'pattern': 'diamond'
+    },
+    9: {
+      'gridSize': 5,
+      'tileTypes': 7,
+      'timeLimit': 32,
+      'pattern': 'complex_mandala'
+    },
+    10: {
+      'gridSize': 5,
+      'tileTypes': 7,
+      'timeLimit': 30,
+      'pattern': 'complex_mandala'
+    },
+  };
+  
   @override
   Future<void> onLoad() async {
     await super.onLoad();
     
-    // Initialize camera
-    camera.viewfinder.visibleGameSize = size;
+    // Initialize camera and world
+    gameWorld = World();
+    gameCamera = CameraComponent.withFixedResolution(
+      world: gameWorld,
+      width: 400,
+      height: 800,
+    );
     
-    // Load saved data
-    await _loadGameData();
+    addAll([gameCamera, gameWorld]);
     
-    // Initialize overlays
-    _setupOverlays();
+    // Initialize game timer
+    _gameTimer = Timer(1.0, repeat: true, onTick: _onTimerTick);
     
-    // Start with menu state
-    _changeGameState(GameState.menu);
+    // Load initial level
+    await _loadLevel(_currentLevel);
     
-    // Track game start
-    _trackEvent('game_start', {});
+    _analyticsService?.logEvent('game_start', {
+      'level': _currentLevel,
+      'timestamp': DateTime.now().millisecondsSinceEpoch,
+    });
   }
-
-  /// Initialize game overlays for UI
-  void _setupOverlays() {
-    overlays.addEntry('menu', (context, game) => MenuOverlay(game: this));
-    overlays.addEntry('hud', (context, game) => HudOverlay(game: this));
-    overlays.addEntry('pause', (context, game) => PauseOverlay(game: this));
-    overlays.addEntry('game_over', (context, game) => GameOverOverlay(game: this));
-    overlays.addEntry('level_complete', (context, game) => LevelCompleteOverlay(game: this));
-    overlays.addEntry('unlock_prompt', (context, game) => UnlockPromptOverlay(game: this));
+  
+  /// Sets the game controller reference
+  void setGameController(GameController controller) {
+    _gameController = controller;
   }
-
-  /// Start a new level
-  Future<void> startLevel(int levelNumber) async {
-    _currentLevel = levelNumber;
-    _currentLevelConfig = _getLevelConfig(levelNumber);
-    _timeRemaining = _currentLevelConfig.timeLimit;
-    _starsEarned = 0;
+  
+  /// Sets the analytics service reference
+  void setAnalyticsService(AnalyticsService service) {
+    _analyticsService = service;
+  }
+  
+  /// Loads a specific level
+  Future<void> _loadLevel(int level) async {
+    try {
+      _gameState = GameState.loading;
+      
+      final config = _levelConfigs[level];
+      if (config == null) {
+        throw Exception('Level $level configuration not found');
+      }
+      
+      _gridSize = config['gridSize'];
+      _tileTypes = config['tileTypes'];
+      _timeLimit = config['timeLimit'];
+      _remainingTime = _timeLimit;
+      
+      // Clear existing tiles
+      gameWorld.removeAll(gameWorld.children.whereType<TileComponent>());
+      
+      // Generate grids
+      _generateGrids(config['pattern']);
+      
+      // Create tile components
+      await _createTileComponents();
+      
+      // Reset game state
+      _moves = 0;
+      _selectedTile = null;
+      
+      _gameState = GameState.playing;
+      _gameTimer.start();
+      
+      _analyticsService?.logEvent('level_start', {
+        'level': level,
+        'grid_size': _gridSize,
+        'tile_types': _tileTypes,
+        'time_limit': _timeLimit,
+      });
+      
+    } catch (e) {
+      debugPrint('Error loading level $level: $e');
+      _gameState = GameState.gameOver;
+    }
+  }
+  
+  /// Generates the current and target grids based on pattern
+  void _generateGrids(String pattern) {
+    final random = Random();
     
-    await _setupLevel();
-    _changeGameState(GameState.playing);
+    // Initialize grids
+    _currentGrid = List.generate(_gridSize, 
+        (i) => List.generate(_gridSize, (j) => random.nextInt(_tileTypes)));
     
-    // Start level timer
-    _levelTimer = Timer(
-      _currentLevelConfig.timeLimit,
-      onTick: () {
-        _timeRemaining -= 0.1;
-        if (_timeRemaining <= 0) {
-          _timeRemaining = 0;
-          _onLevelFailed();
+    _targetGrid = List.generate(_gridSize, 
+        (i) => List.generate(_gridSize, (j) => 0));
+    
+    // Generate target pattern
+    switch (pattern) {
+      case 'checkerboard':
+        _generateCheckerboardPattern();
+        break;
+      case 'stripes':
+        _generateStripesPattern();
+        break;
+      case 'corners':
+        _generateCornersPattern();
+        break;
+      case 'diagonal':
+        _generateDiagonalPattern();
+        break;
+      case 'diagonal_stripes':
+        _generateDiagonalStripesPattern();
+        break;
+      case 'cross':
+        _generateCrossPattern();
+        break;
+      case 'spiral':
+        _generateSpiralPattern();
+        break;
+      case 'diamond':
+        _generateDiamondPattern();
+        break;
+      case 'complex_mandala':
+        _generateComplexMandalaPattern();
+        break;
+      default:
+        _generateCheckerboardPattern();
+    }
+  }
+  
+  /// Generates checkerboard pattern
+  void _generateCheckerboardPattern() {
+    for (int i = 0; i < _gridSize; i++) {
+      for (int j = 0; j < _gridSize; j++) {
+        _targetGrid[i][j] = (i + j) % 2;
+      }
+    }
+  }
+  
+  /// Generates stripes pattern
+  void _generateStripesPattern() {
+    for (int i = 0; i < _gridSize; i++) {
+      for (int j = 0; j < _gridSize; j++) {
+        _targetGrid[i][j] = i % min(_tileTypes, 3);
+      }
+    }
+  }
+  
+  /// Generates corners pattern
+  void _generateCornersPattern() {
+    for (int i = 0; i < _gridSize; i++) {
+      for (int j = 0; j < _gridSize; j++) {
+        if ((i == 0 || i == _gridSize - 1) && (j == 0 || j == _gridSize - 1)) {
+          _targetGrid[i][j] = 1;
+        } else {
+          _targetGrid[i][j] = 0;
         }
-      },
-      repeat: true,
-    );
+      }
+    }
+  }
+  
+  /// Generates diagonal pattern
+  void _generateDiagonalPattern() {
+    for (int i = 0; i < _gridSize; i++) {
+      for (int j = 0; j < _gridSize; j++) {
+        _targetGrid[i][j] = i == j ? 1 : 0;
+      }
+    }
+  }
+  
+  /// Generates diagonal stripes pattern
+  void _generateDiagonalStripesPattern() {
+    for (int i = 0; i < _gridSize; i++) {
+      for (int j = 0; j < _gridSize; j++) {
+        _targetGrid[i][j] = (i + j) % min(_tileTypes, 3);
+      }
+    }
+  }
+  
+  /// Generates cross pattern
+  void _generateCrossPattern() {
+    final center = _gridSize ~/ 2;
+    for (int i = 0; i < _gridSize; i++) {
+      for (int j = 0; j < _gridSize; j++) {
+        _targetGrid[i][j] = (i == center || j == center) ? 1 : 0;
+      }
+    }
+  }
+  
+  /// Generates spiral pattern
+  void _generateSpiralPattern() {
+    final center = _gridSize ~/ 2;
+    for (int i = 0; i < _gridSize; i++) {
+      for (int j = 0; j < _gridSize; j++) {
+        final distance = max((i - center).abs(), (j - center).abs());
+        _targetGrid[i][j] = distance % min(_tileTypes, 3);
+      }
+    }
+  }
+  
+  /// Generates diamond pattern
+  void _generateDiamondPattern() {
+    final center = _gridSize ~/ 2;
+    for (int i = 0; i < _gridSize; i++) {
+      for (int j = 0; j < _gridSize; j++) {
+        final distance = (i - center).abs() + (j - center).abs();
+        _targetGrid[i][j] = distance <= center ? 1 : 0;
+      }
+    }
+  }
+  
+  /// Generates complex mandala pattern
+  void _generateComplexMandalaPattern() {
+    final center = _gridSize ~/ 2;
+    for (int i = 0; i < _gridSize; i++) {
+      for (int j = 0; j < _gridSize; j++) {
+        final dx = i - center;
+        final dy = j - center;
+        final distance = sqrt(dx * dx + dy * dy);
+        final angle = atan2(dy.toDouble(), dx.toDouble());
+        final pattern = (distance * 2 + angle * 4).round();
+        _targetGrid[i][j] = pattern % min(_tileTypes, 4);
+      }
+    }
+  }
+  
+  /// Creates tile components for the grid
+  Future<void> _createTileComponents() async {
+    _tileComponents = List.generate(_gridSize, 
+        (i) => List.generate(_gridSize, (j) => TileComponent()));
     
-    _trackEvent('level_start', {'level': levelNumber});
-  }
-
-  /// Setup the current level
-  Future<void> _setupLevel() async {
-    // Clear existing components
-    removeAll(children.whereType<GameComponent>());
-    _tiles.clear();
-    _selectedTile = null;
-
-    // Create game grid
-    _gameGrid = GridComponent(
-      gridSize: _currentLevelConfig.gridSize,
-      tileSize: _calculateTileSize(),
-    );
-    add(_gameGrid);
-
-    // Create target pattern
-    _targetPattern = PatternComponent(
-      pattern: _currentLevelConfig.targetPattern,
-      position: Vector2(size.x * 0.1, size.y * 0.15),
-      size: Vector2(size.x * 0.3, size.x * 0.3),
-    );
-    add(_targetPattern);
-
-    // Generate and shuffle tiles
-    await _generateTiles();
-  }
-
-  /// Generate tiles for the current level
-  Future<void> _generateTiles() async {
-    final gridSize = _currentLevelConfig.gridSize;
-    final tileSize = _calculateTileSize();
-    final startX = (size.x - (gridSize * tileSize)) / 2;
-    final startY = size.y * 0.4;
-
-    // Create tiles based on target pattern
-    for (int row = 0; row < gridSize; row++) {
-      for (int col = 0; col < gridSize; col++) {
-        final tileType = _currentLevelConfig.targetPattern[row][col];
+    final tileSize = 60.0;
+    final spacing = 5.0;
+    final totalWidth = _gridSize * tileSize + (_gridSize - 1) * spacing;
+    final startX = -totalWidth / 2 + tileSize / 2;
+    final startY = -totalWidth / 2 + tileSize / 2;
+    
+    for (int i = 0; i < _gridSize; i++) {
+      for (int j = 0; j < _gridSize; j++) {
         final tile = TileComponent(
-          tileType: tileType,
-          gridPosition: Vector2(col.toDouble(), row.toDouble()),
+          gridX: j,
+          gridY: i,
+          tileType: _currentGrid[i][j],
           size: Vector2.all(tileSize),
-          position: Vector2(
-            startX + col * tileSize,
-            startY + row * tileSize,
-          ),
         );
         
-        _tiles.add(tile);
-        add(tile);
+        tile.position = Vector2(
+          startX + j * (tileSize + spacing),
+          startY + i * (tileSize + spacing),
+        );
+        
+        _tileComponents[i][j] = tile;
+        gameWorld.add(tile);
       }
     }
-
-    // Shuffle tiles to create puzzle
-    _shuffleTiles();
   }
-
-  /// Shuffle tiles to create the puzzle
-  void _shuffleTiles() {
-    final shuffleCount = _currentLevelConfig.shuffleComplexity;
+  
+  /// Handles tile tap events
+  void onTileTapped(TileComponent tile) {
+    if (_gameState != GameState.playing) return;
     
-    for (int i = 0; i < shuffleCount; i++) {
-      final tile1 = _tiles[_random.nextInt(_tiles.length)];
-      final tile2 = _getAdjacentTile(tile1);
-      
-      if (tile2 != null) {
-        _swapTiles(tile1, tile2, animate: false);
-      }
-    }
-  }
-
-  /// Calculate appropriate tile size based on screen and grid
-  double _calculateTileSize() {
-    final availableWidth = size.x * 0.8;
-    return availableWidth / _currentLevelConfig.gridSize;
-  }
-
-  /// Handle tap events
-  @override
-  bool onTapDown(TapDownInfo info) {
-    if (_gameState != GameState.playing) return false;
-
-    final tappedTile = _getTileAtPosition(info.eventPosition.global);
-    if (tappedTile == null) return false;
-
+    HapticFeedback.lightImpact();
+    
     if (_selectedTile == null) {
       // Select first tile
-      _selectTile(tappedTile);
-    } else if (_selectedTile == tappedTile) {
-      // Deselect if tapping same tile
-      _deselectTile();
-    } else if (_areAdjacent(_selectedTile!, tappedTile)) {
-      // Swap adjacent tiles
-      _swapTiles(_selectedTile!, tappedTile);
-      _deselectTile();
-      _checkLevelComplete();
+      _selectedTile = tile;
+      tile.setSelected(true);
+    } else if (_selectedTile == tile) {
+      // Deselect same tile
+      _selectedTile!.setSelected(false);
+      _selectedTile = null;
     } else {
-      // Select new tile
-      _deselectTile();
-      _selectTile(tappedTile);
-    }
-
-    return true;
-  }
-
-  /// Select a tile
-  void _selectTile(TileComponent tile) {
-    _selectedTile = tile;
-    tile.setSelected(true);
-  }
-
-  /// Deselect current tile
-  void _deselectTile() {
-    _selectedTile?.setSelected(false);
-    _selectedTile = null;
-  }
-
-  /// Swap two tiles
-  void _swapTiles(TileComponent tile1, TileComponent tile2, {bool animate = true}) {
-    final tempType = tile1.tileType;
-    tile1.tileType = tile2.tileType;
-    tile2.tileType = tempType;
-
-    if (animate) {
-      tile1.playSwapAnimation();
-      tile2.playSwapAnimation();
-    }
-  }
-
-  /// Check if two tiles are adjacent
-  bool _areAdjacent(TileComponent tile1, TileComponent tile2) {
-    final pos1 = tile1.gridPosition;
-    final pos2 = tile2.gridPosition;
-    
-    final dx = (pos1.x - pos2.x).abs();
-    final dy = (pos1.y - pos2.y).abs();
-    
-    return (dx == 1 && dy == 0) || (dx == 0 && dy == 1);
-  }
-
-  /// Get tile at screen position
-  TileComponent? _getTileAtPosition(Vector2 position) {
-    for (final tile in _tiles) {
-      if (tile.containsPoint(position)) {
-        return tile;
+      // Try to swap tiles
+      if (_areAdjacent(_selectedTile!, tile)) {
+        _swapTiles(_selectedTile!, tile);
+        _selectedTile!.setSelected(false);
+        _selectedTile = null;
+        _moves++;
+        
+        // Check for level completion
+        if (_checkLevelComplete()) {
+          _onLevelComplete();
+        }
+      } else {
+        // Select new tile
+        _selectedTile!.setSelected(false);
+        _selectedTile = tile;
+        tile.setSelected(true);
       }
     }
-    return null;
   }
-
-  /// Get adjacent tile for shuffling
-  TileComponent? _getAdjacentTile(TileComponent tile) {
-    final adjacentTiles = _tiles.where((t) => _areAdjacent(tile, t)).toList();
-    return adjacentTiles.isEmpty ? null : adjacentTiles[_random.nextInt(adjacentTiles.length)];
+  
+  /// Checks if two tiles are adjacent
+  bool _areAdjacent(TileComponent tile1, TileComponent tile2) {
+    final dx = (tile1.gridX - tile2.gridX).abs();
+    final dy = (tile1.gridY - tile2.gridY).abs();
+    return (dx == 1 && dy == 0) || (dx == 0 && dy == 1);
   }
-
-  /// Check if level is complete
-  void _checkLevelComplete() {
-    if (_isPatternMatched()) {
-      _onLevelComplete();
-    }
-  }
-
-  /// Check if current tile arrangement matches target pattern
-  bool _isPatternMatched() {
-    final gridSize = _currentLevelConfig.gridSize;
+  
+  /// Swaps two tiles
+  void _swapTiles(TileComponent tile1, TileComponent tile2) {
+    // Swap in grid
+    final temp = _currentGrid[tile1.gridY][tile1.gridX];
+    _currentGrid[tile1.gridY][tile1.gridX] = _currentGrid[tile2.gridY][tile2.gridX];
+    _currentGrid[tile2.gridY][tile2.gridX] = temp;
     
-    for (int row = 0; row < gridSize; row++) {
-      for (int col = 0; col < gridSize; col++) {
-        final tile = _tiles.firstWhere(
-          (t) => t.gridPosition.x == col && t.gridPosition.y == row,
-        );
-        
-        if (tile.tileType != _currentLevelConfig.targetPattern[row][col]) {
+    // Update tile types
+    final tempType = tile1.tileType;
+    tile1.setTileType(_currentGrid[tile1.gridY][tile1.gridX]);
+    tile2.setTileType(_currentGrid[tile2.gridY][tile2.gridX]);
+  }
+  
+  /// Checks if the current level is complete
+  bool _checkLevelComplete() {
+    for (int i = 0; i < _gridSize; i++) {
+      for (int j = 0; j < _gridSize; j++) {
+        if (_currentGrid[i][j] != _targetGrid[i][j]) {
           return false;
         }
       }
     }
-    
     return true;
   }
-
-  /// Handle level completion
+  
+  /// Handles level completion
   void _onLevelComplete() {
-    _levelTimer.stop();
-    _calculateScore();
-    _changeGameState(GameState.levelComplete);
+    _gameState = GameState.levelComplete;
+    _gameTimer.stop();
     
-    _trackEvent('level_complete', {
-      'level': _currentLevel,
-      'time_remaining': _timeRemaining,
-      'stars_earned': _starsEarned,
-    });
-  }
-
-  /// Handle level failure
-  void _onLevelFailed() {
-    _levelTimer.stop();
-    _changeGameState(GameState.gameOver);
-    
-    _trackEvent('level_fail', {
-      'level': _currentLevel,
-      'time_remaining': _timeRemaining,
-    });
-  }
-
-  /// Calculate score and stars for completed level
-  void _calculateScore() {
-    final baseScore = 100;
-    final timeBonus = (_timeRemaining * 10).round();
-    final levelScore = baseScore + timeBonus;
-    
+    // Calculate score
+    final timeBonus = _remainingTime * 10;
+    final moveBonus = max(0, 100 - _moves * 5);
+    final levelScore = 100 + timeBonus + moveBonus;
     _score += levelScore;
     
-    // Calculate stars based on performance
-    if (_timeRemaining > _currentLevelConfig.timeLimit * 0.7) {
-      _starsEarned = 3;
-    } else if (_timeRemaining > _currentLevelConfig.timeLimit * 0.4) {
-      _starsEarned = 2;
-    } else {
-      _starsEarned = 1;
-    }
-    
-    _totalStars += _starsEarned;
-  }
-
-  /// Change game state and manage overlays
-  void _changeGameState(GameState newState) {
-    _gameState = newState;
-    
-    // Remove all overlays
-    overlays.removeAll();
-    
-    // Add appropriate overlay
-    switch (newState) {
-      case GameState.menu:
-        overlays.add('menu');
-        break;
-      case GameState.playing:
-        overlays.add('hud');
-        break;
-      case GameState.paused:
-        overlays.add('pause');
-        break;
-      case GameState.gameOver:
-        overlays.add('game_over');
-        break;
-      case GameState.levelComplete:
-        overlays.add('level_complete');
-        break;
-    }
-  }
-
-  /// Pause the game
-  void pauseGame() {
-    if (_gameState == GameState.playing) {
-      _levelTimer.stop();
-      _changeGameState(GameState.paused);
-    }
-  }
-
-  /// Resume the game
-  void resumeGame() {
-    if (_gameState == GameState.paused) {
-      _levelTimer.start();
-      _changeGameState(GameState.playing);
-    }
-  }
-
-  /// Restart current level
-  void restartLevel() {
-    startLevel(_currentLevel);
-  }
-
-  /// Go to next level
-  void nextLevel() {
-    if (_currentLevel < 10) {
-      if (_currentLevel >= 3 && !_isLevelUnlocked(_currentLevel + 1)) {
-        _showUnlockPrompt();
-      } else {
-        startLevel(_currentLevel + 1);
-      }
-    } else {
-      _changeGameState(GameState.menu);
-    }
-  }
-
-  /// Check if level is unlocked
-  bool _isLevelUnlocked(int level) {
-    return level <= 3; // First 3 levels are free
-  }
-
-  /// Show unlock prompt for locked levels
-  void _showUnlockPrompt() {
-    overlays.add('unlock_prompt');
-    _trackEvent('unlock_prompt_shown', {'level': _currentLevel + 1});
-  }
-
-  /// Handle rewarded ad completion
-  void onRewardedAdCompleted() {
-    // Unlock next level
-    _trackEvent('rewarded_ad_completed', {'level': _currentLevel + 1});
-    overlays.remove('unlock_prompt');
-    startLevel(_currentLevel + 1);
-  }
-
-  /// Get level configuration
-  LevelConfig _getLevelConfig(int level) {
-    switch (level) {
-      case 1:
-        return LevelConfig(
-          gridSize: 3,
-          tileTypes: 3,
-          timeLimit: 60.0,
-          targetPattern: _generateSimplePattern(3, 3),
-          shuffleComplexity: 10,
-        );
-      case 2:
-        return LevelConfig(
-          gridSize: 3,
-          tileTypes: 3,
-          timeLimit: 55.0,
-          targetPattern: _generateSimplePattern(3, 3),
-          shuffleComplexity: 15,
-        );
-      case 3:
-        return LevelConfig(
-          gridSize: 3,
-          tileTypes: 4,
-          timeLimit: 50.0,
-          targetPattern: _generateSimplePattern(3, 4),
-          shuffleComplexity: 20,
-        );
-      case 4:
-      case 5:
-        return LevelConfig(
-          gridSize: 4,
-          tileTypes: 5,
-          timeLimit: 45.0,
-          targetPattern: _generateSimplePattern(4, 5),
-          shuffleComplexity: 25,
-        );
-      default:
-        return LevelConfig(
-          gridSize: 5,
-          tileTypes: 7,
-          timeLimit: 30.0,
-          targetPattern: _generateSimplePattern(5, 7),
-          shuffleComplexity: 35,
-        );
-    }
-  }
-
-  /// Generate a simple pattern for the level
-  List<List<int>> _generateSimplePattern(int gridSize, int tileTypes) {
-    final pattern = <List<int>>[];
-    
-    for (int row = 0; row < gridSize; row++) {
-      final rowPattern = <int>[];
-      for (int col = 0; col < gridSize; col++) {
-        // Create checkerboard-like patterns
-        final tileType = (row + col) % tileTypes;
-        rowPattern.add(tileType);
-      }
-      pattern.add(rowPattern);
-    }
+    // Calculate stars (1-3 based on performance)
+    int earnedStars = 1;
+    if (_remainingTime > _timeLimit *

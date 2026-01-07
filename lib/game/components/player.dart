@@ -2,294 +2,391 @@ import 'dart:async';
 import 'dart:math';
 import 'package:flame/components.dart';
 import 'package:flame/events.dart';
-import 'package:flame/game.dart';
+import 'package:flame/effects.dart';
 import 'package:flutter/material.dart';
 
-/// Player component for the puzzle game that manages cursor/selection state
-/// and provides visual feedback for tile interactions
+/// Player component for puzzle game that handles tile selection and interaction
 class Player extends PositionComponent with HasGameRef, TapCallbacks {
   /// Current selected tile position
   Vector2? selectedTilePosition;
   
-  /// Visual indicator for selected tile
-  RectangleComponent? selectionIndicator;
+  /// Player's current star count
+  int stars = 0;
   
-  /// Animation component for selection effects
-  SpriteAnimationComponent? selectionAnimation;
+  /// Current level being played
+  int currentLevel = 1;
   
-  /// Current score accumulated by the player
-  int _score = 0;
+  /// Player's health (lives remaining)
+  int health = 3;
   
-  /// Number of moves made by the player
-  int _moveCount = 0;
+  /// Maximum health
+  static const int maxHealth = 3;
   
-  /// Whether the player can currently interact with tiles
-  bool _canInteract = true;
+  /// Whether player is currently invulnerable
+  bool isInvulnerable = false;
   
-  /// Callback for when tiles are swapped
+  /// Duration of invulnerability frames in seconds
+  static const double invulnerabilityDuration = 1.0;
+  
+  /// Timer for invulnerability
+  Timer? invulnerabilityTimer;
+  
+  /// Selection indicator sprite
+  late SpriteComponent selectionIndicator;
+  
+  /// Player cursor/pointer sprite
+  late SpriteComponent cursor;
+  
+  /// Animation states
+  PlayerAnimationState currentAnimationState = PlayerAnimationState.idle;
+  
+  /// Callback for when player selects a tile
+  Function(Vector2)? onTileSelected;
+  
+  /// Callback for when player attempts to swap tiles
   Function(Vector2, Vector2)? onTileSwap;
   
-  /// Callback for score updates
-  Function(int)? onScoreUpdate;
+  /// Callback for when player takes damage
+  Function()? onDamage;
   
-  /// Callback for move count updates
-  Function(int)? onMoveUpdate;
-
-  /// Gets the current player score
-  int get score => _score;
-  
-  /// Gets the current move count
-  int get moveCount => _moveCount;
-  
-  /// Gets whether player can currently interact
-  bool get canInteract => _canInteract;
+  /// Callback for when player collects stars
+  Function(int)? onStarsCollected;
 
   @override
   Future<void> onLoad() async {
-    super.onLoad();
+    await super.onLoad();
     
-    // Create selection indicator
-    selectionIndicator = RectangleComponent(
-      size: Vector2(64, 64),
-      paint: Paint()
-        ..color = const Color(0xFF45B7D1)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 3.0,
-    );
-    selectionIndicator!.anchor = Anchor.center;
+    // Initialize selection indicator
+    selectionIndicator = SpriteComponent()
+      ..sprite = await Sprite.load('selection_indicator.png')
+      ..size = Vector2(64, 64)
+      ..anchor = Anchor.center
+      ..opacity = 0.0;
+    add(selectionIndicator);
     
-    // Create selection animation effect
-    final selectionSprite = await Sprite.load('selection_effect.png');
-    final selectionSpriteAnimation = SpriteAnimation.spriteList(
-      [selectionSprite],
-      stepTime: 0.1,
-      loop: true,
-    );
+    // Initialize cursor
+    cursor = SpriteComponent()
+      ..sprite = await Sprite.load('cursor.png')
+      ..size = Vector2(32, 32)
+      ..anchor = Anchor.center;
+    add(cursor);
     
-    selectionAnimation = SpriteAnimationComponent(
-      animation: selectionSpriteAnimation,
-      size: Vector2(80, 80),
-      anchor: Anchor.center,
-    );
-    
-    add(selectionIndicator!);
-    add(selectionAnimation!);
-    
-    // Initially hide selection indicators
-    _hideSelection();
+    // Set initial animation state
+    _updateAnimationState(PlayerAnimationState.idle);
   }
 
   @override
   void update(double dt) {
     super.update(dt);
     
-    // Update selection animation opacity for pulsing effect
-    if (selectedTilePosition != null && selectionAnimation != null) {
-      final pulseValue = (sin(game.time * 4) + 1) / 2;
-      selectionAnimation!.opacity = 0.5 + (pulseValue * 0.5);
+    // Update cursor position to follow touch/mouse
+    // This would be updated by the game's input handler
+    
+    // Handle invulnerability timer
+    if (isInvulnerable && invulnerabilityTimer?.isActive != true) {
+      _endInvulnerability();
     }
+    
+    // Update animation based on current state
+    _updateAnimation(dt);
   }
 
-  /// Handles tile selection and swapping logic
+  /// Handles tile selection at given position
   void selectTile(Vector2 tilePosition) {
-    if (!_canInteract) return;
+    if (isInvulnerable) return;
     
     if (selectedTilePosition == null) {
       // First tile selection
-      _selectFirstTile(tilePosition);
+      selectedTilePosition = tilePosition.clone();
+      _showSelectionIndicator(tilePosition);
+      _updateAnimationState(PlayerAnimationState.selecting);
+      onTileSelected?.call(tilePosition);
     } else if (selectedTilePosition == tilePosition) {
       // Deselect current tile
-      _deselectTile();
-    } else if (_areAdjacent(selectedTilePosition!, tilePosition)) {
-      // Swap adjacent tiles
-      _swapTiles(selectedTilePosition!, tilePosition);
+      _clearSelection();
     } else {
-      // Select new tile
-      _selectFirstTile(tilePosition);
+      // Second tile selection - attempt swap
+      final firstTile = selectedTilePosition!;
+      final secondTile = tilePosition;
+      
+      if (_areAdjacent(firstTile, secondTile)) {
+        _performSwap(firstTile, secondTile);
+      } else {
+        // Select new tile instead
+        selectedTilePosition = tilePosition.clone();
+        _showSelectionIndicator(tilePosition);
+      }
     }
   }
 
-  /// Selects the first tile and shows visual feedback
-  void _selectFirstTile(Vector2 tilePosition) {
-    selectedTilePosition = tilePosition;
-    _showSelection(tilePosition);
-  }
-
-  /// Deselects the current tile
-  void _deselectTile() {
-    selectedTilePosition = null;
-    _hideSelection();
-  }
-
-  /// Swaps two adjacent tiles
-  void _swapTiles(Vector2 firstTile, Vector2 secondTile) {
-    if (onTileSwap != null) {
-      onTileSwap!(firstTile, secondTile);
-    }
+  /// Performs tile swap animation and logic
+  void _performSwap(Vector2 tile1, Vector2 tile2) {
+    _updateAnimationState(PlayerAnimationState.swapping);
+    onTileSwap?.call(tile1, tile2);
     
-    _incrementMoveCount();
-    _deselectTile();
+    // Clear selection after swap
+    Timer(const Duration(milliseconds: 300), () {
+      _clearSelection();
+      _updateAnimationState(PlayerAnimationState.idle);
+    });
   }
 
-  /// Checks if two tile positions are adjacent
-  bool _areAdjacent(Vector2 pos1, Vector2 pos2) {
-    final dx = (pos1.x - pos2.x).abs();
-    final dy = (pos1.y - pos2.y).abs();
-    
+  /// Checks if two tiles are adjacent
+  bool _areAdjacent(Vector2 tile1, Vector2 tile2) {
+    final dx = (tile1.x - tile2.x).abs();
+    final dy = (tile1.y - tile2.y).abs();
     return (dx == 1 && dy == 0) || (dx == 0 && dy == 1);
   }
 
-  /// Shows selection indicator at the specified position
-  void _showSelection(Vector2 tilePosition) {
-    if (selectionIndicator != null && selectionAnimation != null) {
-      // Convert tile position to world position
-      final worldPos = _tileToWorldPosition(tilePosition);
-      
-      selectionIndicator!.position = worldPos;
-      selectionAnimation!.position = worldPos;
-      
-      selectionIndicator!.opacity = 1.0;
-      selectionAnimation!.opacity = 1.0;
-    }
-  }
-
-  /// Hides selection indicators
-  void _hideSelection() {
-    if (selectionIndicator != null && selectionAnimation != null) {
-      selectionIndicator!.opacity = 0.0;
-      selectionAnimation!.opacity = 0.0;
-    }
-  }
-
-  /// Converts tile grid position to world position
-  Vector2 _tileToWorldPosition(Vector2 tilePosition) {
-    // Assuming tiles are 64x64 pixels with some padding
-    const tileSize = 64.0;
-    const padding = 8.0;
+  /// Shows selection indicator at given tile position
+  void _showSelectionIndicator(Vector2 tilePosition) {
+    selectionIndicator.position = tilePosition;
+    selectionIndicator.add(
+      OpacityEffect.to(
+        0.8,
+        EffectController(duration: 0.2),
+      ),
+    );
     
-    return Vector2(
-      tilePosition.x * (tileSize + padding) + tileSize / 2,
-      tilePosition.y * (tileSize + padding) + tileSize / 2,
+    // Add pulsing effect
+    selectionIndicator.add(
+      ScaleEffect.by(
+        Vector2.all(1.1),
+        EffectController(
+          duration: 0.5,
+          alternate: true,
+          infinite: true,
+        ),
+      ),
     );
   }
 
-  /// Adds points to the player's score
-  void addScore(int points) {
-    _score += points;
-    if (onScoreUpdate != null) {
-      onScoreUpdate!(_score);
-    }
-  }
-
-  /// Increments the move counter
-  void _incrementMoveCount() {
-    _moveCount++;
-    if (onMoveUpdate != null) {
-      onMoveUpdate!(_moveCount);
-    }
-  }
-
-  /// Resets player state for a new level
-  void resetForNewLevel() {
-    _score = 0;
-    _moveCount = 0;
+  /// Clears current tile selection
+  void _clearSelection() {
     selectedTilePosition = null;
-    _hideSelection();
-    _canInteract = true;
-    
-    if (onScoreUpdate != null) {
-      onScoreUpdate!(_score);
-    }
-    if (onMoveUpdate != null) {
-      onMoveUpdate!(_moveCount);
-    }
-  }
-
-  /// Disables player interaction
-  void disableInteraction() {
-    _canInteract = false;
-    _deselectTile();
-  }
-
-  /// Enables player interaction
-  void enableInteraction() {
-    _canInteract = true;
-  }
-
-  /// Calculates bonus score based on remaining time and efficiency
-  int calculateLevelBonus(int remainingTime, int targetMoves) {
-    int timeBonus = remainingTime * 10;
-    int efficiencyBonus = 0;
-    
-    if (_moveCount <= targetMoves) {
-      efficiencyBonus = (targetMoves - _moveCount) * 50;
-    }
-    
-    return timeBonus + efficiencyBonus;
-  }
-
-  /// Provides hint by highlighting a beneficial move
-  void showHint(Vector2 hintTile1, Vector2 hintTile2) {
-    if (!_canInteract) return;
-    
-    // Flash both tiles to indicate the suggested swap
-    _flashTile(hintTile1);
-    _flashTile(hintTile2);
-  }
-
-  /// Creates a flashing effect on a specific tile
-  void _flashTile(Vector2 tilePosition) {
-    final flashIndicator = RectangleComponent(
-      size: Vector2(64, 64),
-      paint: Paint()
-        ..color = const Color(0xFFFFA07A)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 4.0,
+    selectionIndicator.removeAll(selectionIndicator.children.whereType<Effect>());
+    selectionIndicator.add(
+      OpacityEffect.to(
+        0.0,
+        EffectController(duration: 0.2),
+      ),
     );
-    flashIndicator.anchor = Anchor.center;
-    flashIndicator.position = _tileToWorldPosition(tilePosition);
+    selectionIndicator.scale = Vector2.all(1.0);
+    _updateAnimationState(PlayerAnimationState.idle);
+  }
+
+  /// Handles player taking damage
+  void takeDamage(int damage) {
+    if (isInvulnerable || health <= 0) return;
     
-    add(flashIndicator);
+    health = max(0, health - damage);
+    _startInvulnerability();
+    onDamage?.call();
     
-    // Remove flash after animation
-    Timer(const Duration(seconds: 2), () {
-      remove(flashIndicator);
+    // Add damage effect
+    add(
+      ColorEffect(
+        Colors.red,
+        EffectController(duration: 0.1, alternate: true, repeatCount: 3),
+      ),
+    );
+    
+    if (health <= 0) {
+      _updateAnimationState(PlayerAnimationState.defeated);
+    } else {
+      _updateAnimationState(PlayerAnimationState.damaged);
+    }
+  }
+
+  /// Heals player by specified amount
+  void heal(int amount) {
+    health = min(maxHealth, health + amount);
+  }
+
+  /// Adds stars to player's collection
+  void collectStars(int amount) {
+    stars += amount;
+    onStarsCollected?.call(amount);
+    
+    // Add collection effect
+    _updateAnimationState(PlayerAnimationState.collecting);
+    Timer(const Duration(milliseconds: 500), () {
+      _updateAnimationState(PlayerAnimationState.idle);
     });
+  }
+
+  /// Starts invulnerability period
+  void _startInvulnerability() {
+    isInvulnerable = true;
+    invulnerabilityTimer = Timer(
+      const Duration(milliseconds: (invulnerabilityDuration * 1000).round()),
+      () => _endInvulnerability(),
+    );
+    
+    // Add flashing effect during invulnerability
+    add(
+      OpacityEffect.to(
+        0.5,
+        EffectController(
+          duration: 0.1,
+          alternate: true,
+          infinite: true,
+        ),
+      ),
+    );
+  }
+
+  /// Ends invulnerability period
+  void _endInvulnerability() {
+    isInvulnerable = false;
+    invulnerabilityTimer?.cancel();
+    invulnerabilityTimer = null;
+    
+    // Remove flashing effect
+    removeAll(children.whereType<OpacityEffect>());
+    opacity = 1.0;
+  }
+
+  /// Updates animation state
+  void _updateAnimationState(PlayerAnimationState newState) {
+    if (currentAnimationState == newState) return;
+    
+    currentAnimationState = newState;
+    
+    // Remove existing animation effects
+    cursor.removeAll(cursor.children.whereType<Effect>());
+    
+    switch (newState) {
+      case PlayerAnimationState.idle:
+        cursor.add(
+          MoveEffect.by(
+            Vector2(0, -5),
+            EffectController(
+              duration: 1.0,
+              alternate: true,
+              infinite: true,
+            ),
+          ),
+        );
+        break;
+      case PlayerAnimationState.selecting:
+        cursor.add(
+          ScaleEffect.by(
+            Vector2.all(1.2),
+            EffectController(duration: 0.1),
+          ),
+        );
+        break;
+      case PlayerAnimationState.swapping:
+        cursor.add(
+          RotateEffect.by(
+            2 * pi,
+            EffectController(duration: 0.3),
+          ),
+        );
+        break;
+      case PlayerAnimationState.collecting:
+        cursor.add(
+          ScaleEffect.by(
+            Vector2.all(1.5),
+            EffectController(
+              duration: 0.2,
+              alternate: true,
+            ),
+          ),
+        );
+        break;
+      case PlayerAnimationState.damaged:
+        cursor.add(
+          MoveEffect.by(
+            Vector2(10, 0),
+            EffectController(
+              duration: 0.05,
+              alternate: true,
+              repeatCount: 6,
+            ),
+          ),
+        );
+        break;
+      case PlayerAnimationState.defeated:
+        cursor.add(
+          ScaleEffect.to(
+            Vector2.all(0.5),
+            EffectController(duration: 0.5),
+          ),
+        );
+        cursor.add(
+          OpacityEffect.to(
+            0.3,
+            EffectController(duration: 0.5),
+          ),
+        );
+        break;
+    }
+  }
+
+  /// Updates animation frame
+  void _updateAnimation(double dt) {
+    // Animation updates are handled by effects
+    // This method can be used for custom animation logic if needed
+  }
+
+  /// Resets player to initial state
+  void reset() {
+    health = maxHealth;
+    stars = 0;
+    selectedTilePosition = null;
+    isInvulnerable = false;
+    invulnerabilityTimer?.cancel();
+    invulnerabilityTimer = null;
+    
+    _clearSelection();
+    _updateAnimationState(PlayerAnimationState.idle);
+    
+    // Reset visual effects
+    opacity = 1.0;
+    removeAll(children.whereType<Effect>());
+  }
+
+  /// Advances to next level
+  void advanceLevel() {
+    currentLevel++;
+    // Reset any level-specific state if needed
   }
 
   @override
   bool onTapDown(TapDownEvent event) {
-    if (!_canInteract) return false;
-    
-    // Convert tap position to tile position
-    final tilePos = _worldToTilePosition(event.localPosition);
-    if (_isValidTilePosition(tilePos)) {
-      selectTile(tilePos);
+    // Convert tap position to tile coordinates
+    // This would depend on your grid system implementation
+    final tilePosition = _screenToTilePosition(event.localPosition);
+    if (tilePosition != null) {
+      selectTile(tilePosition);
       return true;
     }
-    
     return false;
   }
 
-  /// Converts world position to tile grid position
-  Vector2 _worldToTilePosition(Vector2 worldPosition) {
-    const tileSize = 64.0;
-    const padding = 8.0;
-    
-    return Vector2(
-      (worldPosition.x / (tileSize + padding)).floor().toDouble(),
-      (worldPosition.y / (tileSize + padding)).floor().toDouble(),
-    );
+  /// Converts screen position to tile grid position
+  Vector2? _screenToTilePosition(Vector2 screenPosition) {
+    // This method should be implemented based on your grid system
+    // For now, returning a placeholder
+    // You would calculate which tile the screen position corresponds to
+    return null;
   }
 
-  /// Validates if a tile position is within the game grid
-  bool _isValidTilePosition(Vector2 tilePosition) {
-    // This should be configured based on current level grid size
-    const maxGridSize = 5; // Maximum grid size for level 10
-    
-    return tilePosition.x >= 0 && 
-           tilePosition.y >= 0 && 
-           tilePosition.x < maxGridSize && 
-           tilePosition.y < maxGridSize;
+  @override
+  void onRemove() {
+    invulnerabilityTimer?.cancel();
+    super.onRemove();
   }
+}
+
+/// Enumeration of player animation states
+enum PlayerAnimationState {
+  idle,
+  selecting,
+  swapping,
+  collecting,
+  damaged,
+  defeated,
 }
